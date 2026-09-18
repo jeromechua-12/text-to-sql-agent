@@ -95,7 +95,10 @@ def test_rows_preview_is_capped(db):
     assert execution.truncated is False
 
 
-def test_logger_appends_jsonl_and_round_trips(db, tmp_path, caplog):
+def test_logger_appends_jsonl_and_round_trips(db, tmp_path, caplog, monkeypatch):
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    monkeypatch.setattr("text_to_sql_agent.tracing.load_dotenv", lambda: None)
     log_path = tmp_path / "logs" / "runs.jsonl"
     run_logger = RunLogger(log_path)
     with caplog.at_level(logging.INFO, logger="text_to_sql_agent.run_log"):

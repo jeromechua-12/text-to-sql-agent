@@ -130,6 +130,7 @@ def test_exhausted_run_marks_last_observe_step(db, tracer):
 def test_tracer_is_disabled_without_keys(db, monkeypatch):
     monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    monkeypatch.setattr("text_to_sql_agent.tracing.load_dotenv", lambda: None)
     tracer = Tracer()
     assert tracer.enabled is False
     run = run_agent("One?", db, ScriptedLLM("SELECT 1"), tracer=tracer)
