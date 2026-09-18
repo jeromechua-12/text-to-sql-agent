@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 data/
 test-suite-sql-eval/
+logs/
