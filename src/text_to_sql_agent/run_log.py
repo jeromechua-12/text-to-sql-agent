@@ -10,13 +10,22 @@ from pydantic import BaseModel, Field
 
 from text_to_sql_agent.agent import AgentRun, Attempt
 from text_to_sql_agent.guardrail import GuardrailDecision, RejectionReason
+from text_to_sql_agent.schema_retrieval import TableMatch
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ROWS_PREVIEW_LIMIT = 5
 
 logger = logging.getLogger("text_to_sql_agent.run_log")
 
 AttemptOutcome = Literal["success", "guardrail_rejected", "execution_error"]
+
+
+class RetrievalRecord(BaseModel):
+    """Which tables schema retrieval kept for the prompt, ranked with scores, out of how many the database has."""
+
+    total_tables: int
+    top_k: int
+    tables: list[TableMatch]
 
 
 class GuardrailRecord(BaseModel):
@@ -73,6 +82,7 @@ class RunRecord(BaseModel):
     question: str
     db_path: str
     schema_text: str
+    retrieval: RetrievalRecord | None = None
     model: str
     status: Literal["success", "failed"]
     final_sql: str | None
@@ -97,12 +107,18 @@ class RunRecord(BaseModel):
     ) -> "RunRecord":
         """Build the log record for a finished run, deriving the retry and recovery summary fields."""
         attempt_count = len(run.attempts)
+        retrieval = run.retrieval
         return cls(
             run_id=run_id or uuid.uuid4().hex,
             recorded_at=datetime.now(UTC),
             question=run.question,
             db_path=run.db_path,
             schema_text=run.schema_text,
+            retrieval=(
+                RetrievalRecord(total_tables=retrieval.total_tables, top_k=retrieval.top_k, tables=retrieval.tables)
+                if retrieval is not None
+                else None
+            ),
             model=run.attempts[0].llm.model,
             status=run.status,
             final_sql=run.final_sql,

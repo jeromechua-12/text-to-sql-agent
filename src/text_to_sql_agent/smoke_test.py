@@ -16,6 +16,7 @@ from text_to_sql_agent.agent import run_agent
 from text_to_sql_agent.llm import LLM, OpenAIChat
 from text_to_sql_agent.run_log import RunLogger
 from text_to_sql_agent.sandbox import execute_query
+from text_to_sql_agent.schema_retrieval import DEFAULT_EMBEDDING_MODEL, DEFAULT_TOP_K, SchemaRetriever, SentenceTransformerEmbedder
 from text_to_sql_agent.tracing import Tracer
 
 DEFAULT_DEV_JSON = Path("data/spider_data/dev.json")
@@ -78,6 +79,8 @@ class SmokeReport(BaseModel):
     recorded_at: datetime
     model: str
     max_attempts: int
+    embedding_model: str | None = None
+    top_k: int | None = None
     summary: SmokeSummary
     results: list[ExampleResult]
 
@@ -119,6 +122,7 @@ def run_smoke_test(
     llm: LLM,
     run_logger: RunLogger,
     tracer: Tracer | None = None,
+    retriever: SchemaRetriever | None = None,
     max_attempts: int = 3,
     batch_id: str | None = None,
 ) -> list[ExampleResult]:
@@ -127,7 +131,7 @@ def run_smoke_test(
     results = []
     for position, example in enumerate(examples, start=1):
         db_path = db_path_for(db_root, example.db_id)
-        run = run_agent(example.question, db_path, llm, max_attempts=max_attempts, tracer=tracer)
+        run = run_agent(example.question, db_path, llm, retriever=retriever, max_attempts=max_attempts, tracer=tracer)
         correct = run.final_sql is not None and execution_match(db_path, run.final_sql, example.gold_sql)
         record = run_logger.log(
             run,
@@ -205,9 +209,10 @@ def format_summary(report: SmokeReport) -> str:
         if summary.recovery_rate is not None
         else "no first-attempt failures"
     )
+    schema = f"top {report.top_k} tables via {report.embedding_model}" if report.top_k is not None else "full schema"
     return "\n".join(
         [
-            f"Smoke test {report.batch_id}: {summary.examples} Spider dev questions, model {report.model}, max {report.max_attempts} attempts",
+            f"Smoke test {report.batch_id}: {summary.examples} Spider dev questions, model {report.model}, max {report.max_attempts} attempts, {schema}",
             f"Execution accuracy: {summary.correct}/{summary.examples} = {summary.execution_accuracy:.1%}",
             f"Self-correction recovery: {recovery}",
             f"Latency: median {summary.latency_median_ms:.0f} ms, p95 {summary.latency_p95_ms:.0f} ms",
@@ -225,18 +230,23 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--model", default="gpt-4o-mini")
     parser.add_argument("--max-attempts", type=int, default=3)
+    parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL)
+    parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K, help="tables kept in the prompt per question")
+    parser.add_argument("--full-schema", action="store_true", help="skip retrieval and put every table in the prompt")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     batch_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     batch_dir = args.output_dir / batch_id
     examples = load_examples(args.dev_json, args.n)
+    retriever = None if args.full_schema else SchemaRetriever(SentenceTransformerEmbedder(args.embedding_model), top_k=args.top_k)
     results = run_smoke_test(
         examples,
         args.db_root,
         OpenAIChat(args.model),
         RunLogger(batch_dir / "runs.jsonl"),
         tracer=Tracer(),
+        retriever=retriever,
         max_attempts=args.max_attempts,
         batch_id=batch_id,
     )
@@ -245,6 +255,8 @@ def main(argv: list[str] | None = None) -> None:
         recorded_at=datetime.now(UTC),
         model=args.model,
         max_attempts=args.max_attempts,
+        embedding_model=None if args.full_schema else args.embedding_model,
+        top_k=None if args.full_schema else args.top_k,
         summary=summarise(results),
         results=results,
     )

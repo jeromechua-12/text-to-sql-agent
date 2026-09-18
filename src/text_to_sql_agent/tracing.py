@@ -11,11 +11,12 @@ from langfuse import Langfuse
 from text_to_sql_agent.guardrail import GuardrailVerdict
 from text_to_sql_agent.llm import LLMResponse
 from text_to_sql_agent.sandbox import ExecutionResult
+from text_to_sql_agent.schema_retrieval import SchemaRetrieval
 
 TRACE_NAME = "text_to_sql"
 ROWS_PREVIEW_LIMIT = 5
 
-StepType = Literal["agent", "generation", "guardrail", "tool", "span"]
+StepType = Literal["agent", "retriever", "generation", "guardrail", "tool", "span"]
 
 
 class Step:
@@ -23,6 +24,17 @@ class Step:
 
     def __init__(self, observation: Any | None) -> None:
         self.observation = observation
+
+    def record_retrieval(self, retrieval: SchemaRetrieval) -> None:
+        """Attach which tables retrieval kept for the prompt, with scores, out of how many the database has."""
+        self._update(
+            output={
+                "mode": "retrieved",
+                "total_tables": retrieval.total_tables,
+                "top_k": retrieval.top_k,
+                "tables": [match.model_dump() for match in retrieval.tables],
+            }
+        )
 
     def record_generation(self, response: LLMResponse) -> None:
         """Attach the model reply, token usage, and cost to a generation observation."""

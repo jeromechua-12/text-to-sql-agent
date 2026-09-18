@@ -212,7 +212,7 @@ def test_run_smoke_test_scores_and_logs_every_example(db_root, people_db, tmp_pa
     assert summary.completion_tokens == 30
 
 
-def test_main_writes_report_and_run_log(db_root, tmp_path, tracer, monkeypatch, capsys):
+def test_main_writes_report_and_run_log(db_root, tmp_path, tracer, embedder, monkeypatch, capsys):
     dev = write_dev_json(
         tmp_path / "dev.json",
         [("people", "How many people?", "SELECT count(*) FROM people"), ("people", "Names by id?", "SELECT name FROM people ORDER BY id")],
@@ -221,6 +221,7 @@ def test_main_writes_report_and_run_log(db_root, tmp_path, tracer, monkeypatch, 
         "text_to_sql_agent.smoke_test.OpenAIChat",
         lambda model: ScriptedLLM("SELECT COUNT(*) FROM people", "SELECT name FROM people ORDER BY id"),
     )
+    monkeypatch.setattr("text_to_sql_agent.smoke_test.SentenceTransformerEmbedder", lambda model: embedder)
     output_dir = tmp_path / "out"
     main(["--n", "2", "--dev-json", str(dev), "--db-root", str(db_root), "--output-dir", str(output_dir), "--model", "fake-model"])
 
@@ -230,6 +231,8 @@ def test_main_writes_report_and_run_log(db_root, tmp_path, tracer, monkeypatch, 
     assert report.batch_id == batch_dirs[0].name
     assert report.model == "fake-model"
     assert report.max_attempts == 3
+    assert report.embedding_model == "all-MiniLM-L6-v2"
+    assert report.top_k == 5
     assert report.summary.examples == 2
     assert report.summary.correct == 2
     assert report.summary.execution_accuracy == 1.0
@@ -239,8 +242,24 @@ def test_main_writes_report_and_run_log(db_root, tmp_path, tracer, monkeypatch, 
     records = load_records(batch_dirs[0] / "runs.jsonl")
     assert len(records) == 2
     assert {record.metadata["batch_id"] for record in records} == {report.batch_id}
+    assert [match.name for match in records[0].retrieval.tables] == ["people"]
 
     out = capsys.readouterr().out
+    assert "max 3 attempts, top 5 tables via all-MiniLM-L6-v2" in out
     assert "Execution accuracy: 2/2 = 100.0%" in out
     assert "Self-correction recovery: no first-attempt failures" in out
     assert f"Report written to {batch_dirs[0] / 'report.json'}" in out
+
+
+def test_main_full_schema_flag_skips_retrieval(db_root, tmp_path, tracer, monkeypatch, capsys):
+    dev = write_dev_json(tmp_path / "dev.json", [("people", "How many people?", "SELECT count(*) FROM people")])
+    monkeypatch.setattr("text_to_sql_agent.smoke_test.OpenAIChat", lambda model: ScriptedLLM("SELECT COUNT(*) FROM people"))
+    output_dir = tmp_path / "out"
+    main(["--n", "1", "--dev-json", str(dev), "--db-root", str(db_root), "--output-dir", str(output_dir), "--full-schema"])
+
+    batch_dir = next(output_dir.iterdir())
+    report = SmokeReport.model_validate_json((batch_dir / "report.json").read_text())
+    assert report.embedding_model is None
+    assert report.top_k is None
+    assert load_records(batch_dir / "runs.jsonl")[0].retrieval is None
+    assert "max 3 attempts, full schema" in capsys.readouterr().out

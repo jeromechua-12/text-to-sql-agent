@@ -1,4 +1,4 @@
-"""Agent loop: an explicit LangGraph state machine that generates SQL, guards it, executes it, and feeds errors back."""
+"""Agent loop: an explicit LangGraph state machine that retrieves schema, generates SQL, guards it, executes it, and feeds errors back."""
 
 import re
 import time
@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from text_to_sql_agent.guardrail import GuardrailVerdict, check_query
 from text_to_sql_agent.llm import LLM, LLMResponse
 from text_to_sql_agent.sandbox import ExecutionResult, execute_query, schema_ddl
+from text_to_sql_agent.schema_retrieval import SchemaRetrieval, SchemaRetriever
 from text_to_sql_agent.tracing import Tracer
 
 SYSTEM_PROMPT = """You translate natural-language questions into SQLite SQL.
@@ -67,19 +68,21 @@ class Attempt(BaseModel):
 
 class AgentState(TypedDict):
     question: str
-    schema_text: str
     db_path: str
+    schema_text: str
+    retrieval: SchemaRetrieval | None
     max_attempts: int
     attempts: list[Attempt]
     status: Literal["running", "success", "failed"]
 
 
 class AgentRun(BaseModel):
-    """Complete record of one run: the input, every attempt, and the final outcome."""
+    """Complete record of one run: the input, the schema the model saw and how it was chosen, every attempt, and the outcome."""
 
     question: str
-    schema_text: str
     db_path: str
+    schema_text: str
+    retrieval: SchemaRetrieval | None = None
     status: Literal["success", "failed"]
     attempts: list[Attempt]
     latency_ms: float
@@ -152,8 +155,18 @@ def execution_hint(error: str) -> str:
     return DEFAULT_EXECUTION_HINT
 
 
-def build_graph(llm: LLM, tracer: Tracer) -> CompiledStateGraph:
-    """Wire the generate -> guardrail -> execute -> observe state machine around the given model, tracing every node."""
+def build_graph(llm: LLM, tracer: Tracer, retriever: SchemaRetriever | None = None) -> CompiledStateGraph:
+    """Wire the retrieve -> generate -> guardrail -> execute -> observe state machine around the model, tracing every node."""
+
+    def retrieve(state: AgentState) -> dict:
+        inputs = {"question": state["question"], "db_path": state["db_path"]}
+        with tracer.step("retrieve", "retriever", 0, inputs) as step:
+            if retriever is None:
+                step.record_output({"mode": "full_schema"})
+                return {"schema_text": schema_ddl(state["db_path"]), "retrieval": None}
+            retrieval = retriever.retrieve(state["db_path"], state["question"])
+            step.record_retrieval(retrieval)
+        return {"schema_text": retrieval.schema_text, "retrieval": retrieval}
 
     def generate(state: AgentState) -> dict:
         index = len(state["attempts"]) + 1
@@ -204,11 +217,13 @@ def build_graph(llm: LLM, tracer: Tracer) -> CompiledStateGraph:
         return END if state["status"] == "failed" else "generate"
 
     graph = StateGraph(AgentState)
+    graph.add_node("retrieve", retrieve)
     graph.add_node("generate", generate)
     graph.add_node("guardrail", guardrail)
     graph.add_node("execute", execute)
     graph.add_node("observe", observe)
-    graph.add_edge(START, "generate")
+    graph.add_edge(START, "retrieve")
+    graph.add_edge("retrieve", "generate")
     graph.add_edge("generate", "guardrail")
     graph.add_conditional_edges("guardrail", route_after_guardrail, ["execute", "observe"])
     graph.add_conditional_edges("execute", route_after_execute, [END, "observe"])
@@ -220,27 +235,29 @@ def run_agent(
     question: str,
     db_path: str | Path,
     llm: LLM,
-    schema_text: str | None = None,
+    retriever: SchemaRetriever | None = None,
     max_attempts: int = 3,
     tracer: Tracer | None = None,
 ) -> AgentRun:
-    """Run the loop for one question inside one trace and return the full attempt history with the final outcome."""
+    """Run the loop for one question inside one trace; without a retriever the prompt carries the full schema DDL."""
     started = time.perf_counter()
     tracer = tracer if tracer is not None else Tracer()
     state: AgentState = {
         "question": question,
-        "schema_text": schema_text if schema_text is not None else schema_ddl(db_path),
         "db_path": str(db_path),
+        "schema_text": "",
+        "retrieval": None,
         "max_attempts": max_attempts,
         "attempts": [],
         "status": "running",
     }
     with tracer.run(question, state["db_path"], max_attempts) as trace:
-        final = build_graph(llm, tracer).invoke(state, config={"recursion_limit": 4 * max_attempts + 2})
+        final = build_graph(llm, tracer, retriever).invoke(state, config={"recursion_limit": 4 * max_attempts + 3})
         run = AgentRun(
             question=question,
-            schema_text=final["schema_text"],
             db_path=final["db_path"],
+            schema_text=final["schema_text"],
+            retrieval=final["retrieval"],
             status=final["status"],
             attempts=final["attempts"],
             latency_ms=(time.perf_counter() - started) * 1000,

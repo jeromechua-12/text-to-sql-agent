@@ -52,7 +52,7 @@ def execute_query(db_path: str | Path, sql: str, row_limit: int | None = 100) ->
 
 
 def schema_ddl(db_path: str | Path) -> str:
-    """Return the CREATE TABLE statements of every user table, the fallback until schema retrieval exists."""
+    """Return the CREATE TABLE statements of every user table, the full-schema fallback used when no retriever is configured."""
     connection = read_only_connection(db_path)
     rows = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY name"

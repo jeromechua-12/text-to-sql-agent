@@ -6,6 +6,7 @@ from text_to_sql_agent.agent import Attempt, extract_sql, package_observation, r
 from text_to_sql_agent.guardrail import RejectionReason
 from text_to_sql_agent.llm import LLMResponse
 from text_to_sql_agent.sandbox import execute_query, schema_ddl
+from text_to_sql_agent.schema_retrieval import SchemaRetriever
 
 
 class ScriptedLLM:
@@ -40,6 +41,19 @@ def test_first_attempt_success(db):
     assert run.attempts[0].observation is None
     assert run.prompt_tokens == 10
     assert "CREATE TABLE people" in llm.prompts[0]
+    assert run.retrieval is None
+
+
+def test_retriever_prunes_the_schema_shown_to_the_model(concert_db, concert_ddl, embedder):
+    llm = ScriptedLLM("SELECT name FROM singer WHERE country = 'France'")
+    run = run_agent("Which singers come from France?", concert_db, llm, retriever=SchemaRetriever(embedder, top_k=1))
+    assert run.status == "success"
+    assert run.result.rows == [("Joe",)]
+    assert run.schema_text == concert_ddl["singer"]
+    assert [match.name for match in run.retrieval.tables] == ["singer"]
+    assert run.retrieval.total_tables == 4
+    assert f"Schema:\n{concert_ddl['singer']}\n\nQuestion:" in llm.prompts[0]
+    assert "CREATE TABLE stadium" not in llm.prompts[0]
 
 
 def test_guardrail_rejection_feeds_back_and_recovers(db):

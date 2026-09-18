@@ -7,6 +7,7 @@ from text_to_sql_agent.agent import run_agent
 from text_to_sql_agent.guardrail import GuardrailDecision, RejectionReason
 from text_to_sql_agent.llm import LLMResponse
 from text_to_sql_agent.run_log import SCHEMA_VERSION, RunLogger, RunRecord, load_records
+from text_to_sql_agent.schema_retrieval import SchemaRetriever
 
 
 class ScriptedLLM:
@@ -44,6 +45,7 @@ def test_record_for_first_attempt_success(db):
     assert record.cost_usd == 0.0
     assert record.question == "Who is over 25?"
     assert record.schema_text == "CREATE TABLE people (id INTEGER, name TEXT, age INTEGER)"
+    assert record.retrieval is None
     attempt = record.attempts[0]
     assert attempt.outcome == "success"
     assert attempt.guardrail.decision is GuardrailDecision.ALLOW
@@ -52,6 +54,22 @@ def test_record_for_first_attempt_success(db):
     assert attempt.execution.row_count == 2
     assert attempt.execution.rows_preview == [["p6"], ["p7"]]
     assert attempt.observation is None
+
+
+def test_record_carries_retrieval_and_round_trips(concert_db, concert_ddl, embedder, tmp_path, monkeypatch):
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    monkeypatch.setattr("text_to_sql_agent.tracing.load_dotenv", lambda: None)
+    retriever = SchemaRetriever(embedder, top_k=1)
+    run = run_agent("Which singers come from France?", concert_db, ScriptedLLM("SELECT name FROM singer"), retriever=retriever)
+    log_path = tmp_path / "runs.jsonl"
+    record = RunLogger(log_path).log(run)
+    assert record.schema_text == concert_ddl["singer"]
+    assert record.retrieval.total_tables == 4
+    assert record.retrieval.top_k == 1
+    assert [match.name for match in record.retrieval.tables] == ["singer"]
+    assert record.retrieval.tables[0].matched == "singer.country"
+    assert load_records(log_path) == [record]
 
 
 def test_record_marks_recovery_after_guardrail_rejection(db):
