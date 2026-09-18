@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from text_to_sql_agent.guardrail import GuardrailVerdict, check_query
 from text_to_sql_agent.llm import LLM, LLMResponse
 from text_to_sql_agent.sandbox import ExecutionResult, execute_query, schema_ddl
+from text_to_sql_agent.tracing import Tracer
 
 SYSTEM_PROMPT = """You translate natural-language questions into SQLite SQL.
 Rules:
@@ -82,6 +83,7 @@ class AgentRun(BaseModel):
     status: Literal["success", "failed"]
     attempts: list[Attempt]
     latency_ms: float
+    trace_id: str | None = None
 
     @property
     def final_sql(self) -> str | None:
@@ -150,33 +152,42 @@ def execution_hint(error: str) -> str:
     return DEFAULT_EXECUTION_HINT
 
 
-def build_graph(llm: LLM) -> CompiledStateGraph:
-    """Wire the generate -> guardrail -> execute -> observe state machine around the given model."""
+def build_graph(llm: LLM, tracer: Tracer) -> CompiledStateGraph:
+    """Wire the generate -> guardrail -> execute -> observe state machine around the given model, tracing every node."""
 
     def generate(state: AgentState) -> dict:
-        response = llm.complete(SYSTEM_PROMPT, build_prompt(state))
-        attempt = Attempt(
-            index=len(state["attempts"]) + 1,
-            raw_response=response.text,
-            sql=extract_sql(response.text),
-            llm=response,
-        )
+        index = len(state["attempts"]) + 1
+        prompt = build_prompt(state)
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
+        with tracer.step("generate", "generation", index, messages) as step:
+            response = llm.complete(SYSTEM_PROMPT, prompt)
+            step.record_generation(response)
+        attempt = Attempt(index=index, raw_response=response.text, sql=extract_sql(response.text), llm=response)
         return {"attempts": [*state["attempts"], attempt]}
 
     def guardrail(state: AgentState) -> dict:
-        verdict = check_query(state["attempts"][-1].sql)
+        attempt = state["attempts"][-1]
+        with tracer.step("guardrail", "guardrail", attempt.index, {"sql": attempt.sql}) as step:
+            verdict = check_query(attempt.sql)
+            step.record_verdict(verdict)
         return {"attempts": _update_last(state["attempts"], verdict=verdict)}
 
     def execute(state: AgentState) -> dict:
-        result = execute_query(state["db_path"], state["attempts"][-1].sql)
+        attempt = state["attempts"][-1]
+        with tracer.step("execute", "tool", attempt.index, {"sql": attempt.sql, "db_path": state["db_path"]}) as step:
+            result = execute_query(state["db_path"], attempt.sql)
+            step.record_execution(result)
         return {
             "attempts": _update_last(state["attempts"], execution=result),
             "status": "success" if result.ok else "running",
         }
 
     def observe(state: AgentState) -> dict:
-        observation = package_observation(state["attempts"][-1])
+        attempt = state["attempts"][-1]
         exhausted = len(state["attempts"]) >= state["max_attempts"]
+        with tracer.step("observe", "span", attempt.index, {"max_attempts": state["max_attempts"]}) as step:
+            observation = package_observation(attempt)
+            step.record_output({**observation.model_dump(), "exhausted": exhausted})
         return {
             "attempts": _update_last(state["attempts"], observation=observation),
             "status": "failed" if exhausted else "running",
@@ -211,9 +222,11 @@ def run_agent(
     llm: LLM,
     schema_text: str | None = None,
     max_attempts: int = 3,
+    tracer: Tracer | None = None,
 ) -> AgentRun:
-    """Run the loop for one question and return the full attempt history with the final outcome."""
+    """Run the loop for one question inside one trace and return the full attempt history with the final outcome."""
     started = time.perf_counter()
+    tracer = tracer if tracer is not None else Tracer()
     state: AgentState = {
         "question": question,
         "schema_text": schema_text if schema_text is not None else schema_ddl(db_path),
@@ -222,15 +235,19 @@ def run_agent(
         "attempts": [],
         "status": "running",
     }
-    final = build_graph(llm).invoke(state, config={"recursion_limit": 4 * max_attempts + 2})
-    return AgentRun(
-        question=question,
-        schema_text=final["schema_text"],
-        db_path=final["db_path"],
-        status=final["status"],
-        attempts=final["attempts"],
-        latency_ms=(time.perf_counter() - started) * 1000,
-    )
+    with tracer.run(question, state["db_path"], max_attempts) as trace:
+        final = build_graph(llm, tracer).invoke(state, config={"recursion_limit": 4 * max_attempts + 2})
+        run = AgentRun(
+            question=question,
+            schema_text=final["schema_text"],
+            db_path=final["db_path"],
+            status=final["status"],
+            attempts=final["attempts"],
+            latency_ms=(time.perf_counter() - started) * 1000,
+            trace_id=tracer.current_trace_id(),
+        )
+        trace.record_output({"status": run.status, "final_sql": run.final_sql, "attempts": len(run.attempts)})
+    return run
 
 
 def _update_last(attempts: list[Attempt], **fields: object) -> list[Attempt]:

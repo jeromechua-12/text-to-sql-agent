@@ -114,7 +114,7 @@ class RunRecord(BaseModel):
             cost_usd=run.cost_usd,
             latency_ms=run.latency_ms,
             attempts=[attempt_record(attempt) for attempt in run.attempts],
-            trace_id=trace_id,
+            trace_id=trace_id if trace_id is not None else run.trace_id,
             metadata=metadata or {},
         )
 
