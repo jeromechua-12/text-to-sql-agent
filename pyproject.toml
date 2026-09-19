@@ -4,6 +4,7 @@ version = "0.1.0"
 requires-python = "==3.13.13"
 dependencies = [
     "faiss-cpu>=1.11",
+    "fastapi>=0.141.1",
     "langfuse>=4.15.4",
     "langgraph>=1.2.11",
     "numpy>=2.0",
@@ -12,10 +13,12 @@ dependencies = [
     "python-dotenv>=1.2.3",
     "sentence-transformers>=5.0",
     "sqlglot>=30.18.0",
+    "uvicorn[standard]>=0.53.0",
 ]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=8",
 ]
 

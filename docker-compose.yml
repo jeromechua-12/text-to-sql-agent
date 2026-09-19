@@ -1,0 +1,11 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data:ro
+    environment:
+      SPIDER_DB_ROOT: /app/data/spider_data/database

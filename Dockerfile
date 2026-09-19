@@ -15,4 +15,6 @@ RUN uv sync --frozen --no-install-project
 COPY . .
 RUN uv sync --frozen
 
-CMD ["uv", "run", "pytest"]
+EXPOSE 8000
+
+CMD ["uv", "run", "uvicorn", "text_to_sql_agent.api:app", "--host", "0.0.0.0", "--port", "8000"]
